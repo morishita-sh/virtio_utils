@@ -28,9 +28,9 @@ fi
 
 # Read two bytes rather than relying on the monitor's halfword byte order.
 # Validate the entire response: a monitor error must never turn into zero.
-read_idx() {
+read_u16() {
     local base=$1 address output pattern low high
-    printf -v address '0x%x' "$((base + 2))"
+    printf -v address '0x%x' "$base"
     if ! output=$(virsh qemu-monitor-command "$vm" --hmp "xp /2bx $address"); then
         return 1
     fi
@@ -40,7 +40,7 @@ read_idx() {
         printf 'Memory read failed at %s: %s\n' "$address" "$output" >&2
         return 1
     fi
-    if (( 16#${BASH_REMATCH[2]} != base + 2 )); then
+    if (( 16#${BASH_REMATCH[2]} != base )); then
         echo 'Unexpected address in memory response' >&2
         return 1
     fi
@@ -65,8 +65,17 @@ if jq -e '.return["guest-features"] | .. | strings | select(contains("RING_PACKE
     exit 1
 fi
 
-printf 'VM: %s (x86 split ring, queues: %s)\n' "$vm" "$queue_count"
-printf '%-7s %7s %12s %12s\n' QUEUE SIZE AVAIL_IDX USED_IDX
+event_idx=UNKNOWN
+if jq -e '.return["guest-features"] | type == "object"' <<< "$status" >/dev/null; then
+    event_idx=OFF
+    if jq -e '.return["guest-features"] | .. | strings | select(contains("EVENT_IDX"))' <<< "$status" >/dev/null; then
+        event_idx=ON
+    fi
+fi
+
+printf 'VM: %s (x86 split ring, queues: %s, EVENT_IDX: %s)\n' "$vm" "$queue_count" "$event_idx"
+row_format='%-7s %6s %10s %10s %12s %12s %11s %11s\n'
+printf "$row_format" QUEUE SIZE AVAIL_IDX USED_IDX AVAIL_FLAGS USED_FLAGS USED_EVENT AVAIL_EVENT
 for ((q=0; q<queue_count; q++)); do
     label="Q$q"
     if [[ $device_id == 1 ]]; then
@@ -92,14 +101,33 @@ for ((q=0; q<queue_count; q++)); do
         continue
     fi
     if (( size == 0 || avail_addr == 0 || used_addr == 0 )); then
-        printf '%-7s %7s %12s %12s\n' "$label" "$size" N/A N/A
+        printf "$row_format" "$label" "$size" N/A N/A N/A N/A N/A N/A
         continue
     fi
     avail_idx=N/A
     used_idx=N/A
-    if value=$(read_idx "$avail_addr"); then avail_idx=$value; fi
-    if value=$(read_idx "$used_addr"); then used_idx=$value; fi
-    printf '%-7s %7s %12s %12s\n' "$label" "$size" "$avail_idx" "$used_idx"
+    avail_flags=N/A
+    used_flags=N/A
+    used_event=N/A
+    avail_event=N/A
+    if value=$(read_u16 "$((avail_addr + 2))"); then avail_idx=$value; fi
+    if value=$(read_u16 "$((used_addr + 2))"); then used_idx=$value; fi
+    if value=$(read_u16 "$avail_addr"); then printf -v avail_flags '0x%04x' "$value"; fi
+    if value=$(read_u16 "$used_addr"); then printf -v used_flags '0x%04x' "$value"; fi
+    # Event words are meaningful only when EVENT_IDX was negotiated.
+    if [[ $event_idx == ON ]]; then
+        if value=$(read_u16 "$((avail_addr + 4 + 2 * size))"); then used_event=$value; fi
+        if value=$(read_u16 "$((used_addr + 4 + 8 * size))"); then avail_event=$value; fi
+    elif [[ $event_idx == OFF ]]; then
+        used_event=-
+        avail_event=-
+    fi
+    printf "$row_format" "$label" "$size" "$avail_idx" "$used_idx" "$avail_flags" "$used_flags" "$used_event" "$avail_event"
 done
+if [[ $event_idx == ON ]]; then
+    printf '\nEVENT_IDX ON: event indices control notification suppression; flags bit 0 is ignored.\n'
+elif [[ $event_idx == OFF ]]; then
+    printf '\nEVENT_IDX OFF: AVAIL_FLAGS bit 0 = NO_INTERRUPT; USED_FLAGS bit 0 = NO_NOTIFY.\n'
+fi
 printf '\nIndices wrap at 65536. Reads are sequential, not an atomic snapshot.\n'
 printf 'A reset during a read can invalidate addresses; retry on the next refresh.\n'
