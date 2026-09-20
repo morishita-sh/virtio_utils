@@ -1,8 +1,8 @@
 # virtio_utils
 ## vq_watch.sh
 ```bash
-$ virsh qemu-monitor-command <vm> --hmp "info virtio"
-check device_path
+$ virsh qemu-monitor-command <VM_NAME> --hmp "info virtio"
+check DEVICE_PATH
 
-$ ./vq_watch.sh <vm> <device_path> [interval_seconds]
+$ ./vq_watch.sh <VM_NAME> <DEVICE_PATH> [INTERVAL_SECONDS]
 ```
